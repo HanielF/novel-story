@@ -43,6 +43,8 @@ h1 em { color:var(--rust); font-style:normal; }
 .book-head h2 { margin:9px 0 6px; font-size:32px; }
 .book-head p { margin:0; color:#73756d; font-size:13px; }
 .book-actions { display:flex; gap:8px; }
+.speed-control { display:flex; align-items:center; gap:8px; color:#73756d; font-size:12px; }
+.speed-control select { border:1px solid var(--line); background:#f4f1e9; color:var(--ink); padding:8px 9px; outline:none; }
 .chapter-list { max-height:430px; overflow:auto; }
 .chapter { min-height:58px; display:grid; grid-template-columns:24px 52px 1fr 60px; align-items:center; padding:0 32px; border-bottom:1px solid #e7e2d8; cursor:pointer; }
 .chapter:hover { background:#f5f2ea; }

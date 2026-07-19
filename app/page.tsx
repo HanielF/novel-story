@@ -14,6 +14,7 @@ export default function Home() {
   const [message, setMessage] = useState("粘贴小说目录页链接，从读取目录开始");
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
+  const [concurrency, setConcurrency] = useState(6);
   const [failureReason, setFailureReason] = useState("");
   const contentsRef = useRef<Record<string, string>>({});
   const abortRef = useRef(false);
@@ -52,49 +53,62 @@ export default function Home() {
     abortRef.current = false;
     setRunning(true);
     setFailureReason("");
-    setMessage("开始逐章整理，请保持页面开启");
+    setMessage(`正在以 ${concurrency} 路并发整理，请保持页面开启`);
     const nextContents = contentsRef.current;
     const workingChapters = chapters.map((chapter) => ({ ...chapter }));
-    let consecutiveFailures = 0;
+    const pendingIndexes = workingChapters
+      .map((chapter, index) => ({ chapter, index }))
+      .filter(({ chapter }) => chapter.selected && !nextContents[chapter.url])
+      .map(({ index }) => index);
+    let queuePosition = 0;
+    let completedSinceRender = 0;
+    let failureStreak = 0;
     let lastFailure = "";
     let totalFailures = 0;
-    for (let i = 0; i < chapters.length; i += 1) {
-      const chapter = chapters[i];
-      if (!chapter.selected || nextContents[chapter.url]) continue;
-      if (abortRef.current) break;
-      try {
-        let data: { content?: string; error?: string } = {};
-        let response: Response | null = null;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          response = await fetch("/api/novel", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "chapter", url: chapter.url }),
-          });
-          data = await response.json();
-          if (response.ok) break;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 900 * (attempt + 1)));
+    async function worker() {
+      while (!abortRef.current) {
+        const position = queuePosition;
+        queuePosition += 1;
+        if (position >= pendingIndexes.length) return;
+        const index = pendingIndexes[position];
+        const chapter = workingChapters[index];
+        try {
+          let data: { content?: string; error?: string } = {};
+          let response: Response | null = null;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            response = await fetch("/api/novel", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ action: "chapter", url: chapter.url }),
+            });
+            data = await response.json();
+            if (response.ok) break;
+            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)));
+          }
+          if (!response?.ok || !data.content) throw new Error(data.error || "章节读取失败");
+          nextContents[chapter.url] = data.content;
+          workingChapters[index].status = "done";
+          failureStreak = 0;
+        } catch (error) {
+          lastFailure = error instanceof Error ? error.message : "章节读取失败";
+          failureStreak += 1;
+          totalFailures += 1;
+          setFailureReason(lastFailure);
+          workingChapters[index].status = "failed";
+          if (failureStreak >= concurrency * 2) {
+            setMessage(`已暂停：连续多章失败。${lastFailure}`);
+            abortRef.current = true;
+          }
         }
-        if (!response?.ok || !data.content) throw new Error(data.error || "章节读取失败");
-        nextContents[chapter.url] = data.content;
-        workingChapters[i].status = "done";
-        if ((i + 1) % 10 === 0) setChapters(workingChapters.map((item) => ({ ...item })));
-        consecutiveFailures = 0;
-      } catch (error) {
-        lastFailure = error instanceof Error ? error.message : "章节读取失败";
-        consecutiveFailures += 1;
-        totalFailures += 1;
-        setFailureReason(lastFailure);
-        workingChapters[i].status = "failed";
-        setChapters(workingChapters.map((item) => ({ ...item })));
-        if (consecutiveFailures >= 3) {
-          setMessage(`已暂停：连续 3 章失败。${lastFailure}`);
-          abortRef.current = true;
-          break;
+        completedSinceRender += 1;
+        if (completedSinceRender >= 10 || abortRef.current) {
+          completedSinceRender = 0;
+          setChapters(workingChapters.map((item) => ({ ...item })));
         }
+        if (!abortRef.current) await new Promise((resolve) => setTimeout(resolve, 220));
       }
-      await new Promise((resolve) => setTimeout(resolve, 700));
     }
+    await Promise.all(Array.from({ length: Math.min(concurrency, pendingIndexes.length) }, () => worker()));
     setChapters(workingChapters.map((item) => ({ ...item })));
     setRunning(false);
     if (!abortRef.current) setMessage(totalFailures ? `本轮完成，仍有 ${totalFailures} 章失败，可点击继续制作重试` : "整理完成，可以下载 TXT 了");
@@ -159,6 +173,13 @@ export default function Home() {
           <div className="book-head">
             <div><span className="section-label">已识别书目</span><h2>{book.title}</h2><p>{book.author || "作者信息未识别"} · 共 {chapters.length} 章</p></div>
             <div className="book-actions">
+              <label className="speed-control">并发
+                <select value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} disabled={running}>
+                  <option value={3}>3 路（稳妥）</option>
+                  <option value={6}>6 路（推荐）</option>
+                  <option value={10}>10 路（快速）</option>
+                </select>
+              </label>
               <button className="quiet" onClick={() => toggleAll(true)}>全选</button>
               <button className="quiet" onClick={() => toggleAll(false)}>清空</button>
             </div>
