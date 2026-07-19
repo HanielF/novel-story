@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import iconv from "iconv-lite";
 
 export const runtime = "edge";
 
@@ -68,11 +69,106 @@ type ParsedPage = { title: string; html: string };
 
 function sourceFor(url: URL) {
   const host = url.hostname.toLowerCase();
+  if (host === "piaotia.com" || host.endsWith(".piaotia.com")) return "piaotia";
+  if (host === "biqu33.cc" || host.endsWith(".biqu33.cc")) return "biqu33";
   if (host === "zh.wikisource.org" || host.endsWith(".wikisource.org")) return "wikisource";
   if (host === "aozora.gr.jp" || host === "www.aozora.gr.jp") return "aozora";
   if (host === "zongheng.com" || host.endsWith(".zongheng.com")) return "zongheng";
   if (host === "jjwxc.net" || host.endsWith(".jjwxc.net")) return "jjwxc";
   return "generic";
+}
+
+type SearchMatch = { title: string; author?: string; url: string; sourceKey: string; source: string };
+type SearchAttempt = { source: string; ok: boolean; detail: string };
+
+function encodeFormGbk(values: Record<string, string>) {
+  const parts: number[] = [];
+  const safe = /[A-Za-z0-9_.~-]/;
+  const push = (value: string) => {
+    for (const byte of iconv.encode(value, "gb18030")) {
+      const character = String.fromCharCode(byte);
+      if (safe.test(character)) parts.push(byte);
+      else for (const code of `%${byte.toString(16).toUpperCase().padStart(2, "0")}`) parts.push(code.charCodeAt(0));
+    }
+  };
+  Object.entries(values).forEach(([key, value], index) => {
+    if (index) parts.push(38);
+    push(key); parts.push(61); push(value);
+  });
+  return new Uint8Array(parts);
+}
+
+async function searchPiaotia(query: string): Promise<SearchMatch | null> {
+  const url = new URL("https://www.piaotia.com/modules/article/search.php");
+  const response = await fetch(url, {
+    method: "POST",
+    redirect: "follow",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+      referer: "https://www.piaotia.com/",
+    },
+    body: encodeFormGbk({ searchtype: "articlename", searchkey: query }),
+  });
+  if (!response.ok) throw new Error(`返回 ${response.status}`);
+  const html = new TextDecoder("gb18030").decode(await response.arrayBuffer());
+  const direct = /<caption>[\s\S]*?<font[^>]*>([\s\S]*?)<\/font>[\s\S]*?<a\b[^>]*href=["'](https?:\/\/www\.piaotia\.com\/html\/\d+\/\d+\/(?:index\.html)?)['"]/i.exec(html);
+  if (direct && normalizeTitle(direct[1]) === normalizeTitle(query)) return { title: cleanText(direct[1]), url: direct[2], sourceKey: "piaotia", source: "飘天文学" };
+  for (const row of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const link = /<a\b[^>]*href=["'](https?:\/\/www\.piaotia\.com\/(?:bookinfo|html)\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/i.exec(row[1]);
+    if (!link) continue;
+    const title = cleanText(link[2]);
+    if (normalizeTitle(title) !== normalizeTitle(query)) continue;
+    const url = new URL(link[1]);
+    if (/bookinfo/i.test(url.pathname)) url.pathname = url.pathname.replace(/^\/bookinfo\/(\d+)\/(\d+)\.html$/i, "/html/$1/$2/");
+    return { title, url: url.href, sourceKey: "piaotia", source: "飘天文学" };
+  }
+  return null;
+}
+
+async function searchZongheng(query: string): Promise<SearchMatch | null> {
+  const url = new URL("https://search.zongheng.com/search/book");
+  url.search = new URLSearchParams({ keyword: query, sort: "null", pageNo: "1", pageNum: "20", isFromHuayu: "0" }).toString();
+  const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "Mozilla/5.0 (compatible; ShiyeNovelTxt/1.0)" } });
+  if (!response.ok) throw new Error(`返回 ${response.status}`);
+  const data = await response.json() as { data?: { datas?: { list?: Array<Record<string, unknown>> } } };
+  const books = data.data?.datas?.list || [];
+  for (const item of books) {
+    const title = cleanText(String(item.name || item.bookName || item.keyword || ""));
+    const id = String(item.bookId || item.id || "");
+    if (normalizeTitle(title) === normalizeTitle(query) && /^\d+$/.test(id)) return { title, author: String(item.authorName || item.author || ""), url: `https://www.zongheng.com/detail/${id}`, sourceKey: "zongheng", source: "纵横中文网" };
+  }
+  return null;
+}
+
+async function searchWikisource(query: string): Promise<SearchMatch | null> {
+  const url = new URL("https://zh.wikisource.org/w/api.php");
+  url.search = new URLSearchParams({ action: "query", titles: query, redirects: "1", format: "json", formatversion: "2", origin: "*" }).toString();
+  const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "ShiyeNovelTxt/1.0 (public-domain personal reading tool)" } });
+  if (!response.ok) throw new Error(`返回 ${response.status}`);
+  const data = await response.json() as { query?: { pages?: Array<{ title: string; missing?: boolean }> } };
+  const found = data.query?.pages?.find((item) => !item.missing);
+  return found ? { title: found.title, url: `https://zh.wikisource.org/wiki/${encodeURIComponent(found.title.replace(/ /g, "_"))}`, sourceKey: "wikisource", source: "中文维基文库" } : null;
+}
+
+async function searchBook(query: string, requested: string) {
+  const definitions = [
+    { key: "piaotia", name: "飘天文学", search: searchPiaotia },
+    { key: "zongheng", name: "纵横中文网", search: searchZongheng },
+    { key: "wikisource", name: "中文维基文库", search: searchWikisource },
+  ].filter((item) => requested === "auto" || requested === item.key);
+  if (!definitions.length) throw new Error("该书源暂只支持粘贴作品链接");
+  const attempts: SearchAttempt[] = [];
+  for (const definition of definitions) {
+    try {
+      const match = await definition.search(query);
+      attempts.push({ source: definition.name, ok: Boolean(match), detail: match ? "已找到" : "没有同名作品" });
+      if (match) return { match, attempts };
+    } catch (error) {
+      attempts.push({ source: definition.name, ok: false, detail: error instanceof Error ? error.message : "读取失败" });
+    }
+  }
+  return { match: null, attempts };
 }
 
 function pageNameFromWikisourceUrl(url: URL) {
@@ -290,6 +386,87 @@ function parseJjwxcChapter(html: string, expectedTitle: string) {
   return content;
 }
 
+function previousLink(html: string, base: URL) {
+  const match = /<a\b(?=[^>]*(?:rel=["']?prev["']?|>\s*上一章\s*<))[^>]*href=["']?([^\s"'>]+)["']?[^>]*>/i.exec(html)
+    || /<a\b[^>]*href=["']?([^\s"'>]+)["']?[^>]*>\s*上一章\s*<\/a>/i.exec(html);
+  if (!match) return "";
+  try {
+    const url = new URL(match[1], base);
+    return url.hostname === base.hostname && url.pathname !== base.pathname ? url.href : "";
+  } catch { return ""; }
+}
+
+function biquChapterTitle(html: string) {
+  return cleanText(/<h2\b[^>]*id=["']?post-h2["']?[^>]*>([\s\S]*?)<\/h2>/i.exec(html)?.[1]
+    || /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1]
+    || /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]
+    || "未命名章节").replace(/^.*?<br\s*\/?>(.*)$/i, "$1").trim();
+}
+
+async function parseBiqu33Index(html: string, base: URL) {
+  const title = cleanText(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] || /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] || "未命名小说").replace(/[-_].*$/, "").trim();
+  const author = /<title[^>]*>[^<]*?-([^<-]{2,30})-(?:无删减|无错字)/i.exec(html)?.[1]?.trim() || /作者[：:\s]+([^\s|/]{2,24})/.exec(cleanText(html))?.[1] || "";
+  const seen = new Set<string>();
+  const newestFirst: { title: string; url: string }[] = [];
+  for (const match of html.matchAll(/<a\b[^>]*href=["']?(\/book\/[^\s"'>]+\/\d+\/)["']?[^>]*(?:title=["']([^"']+)["'])?[^>]*>([\s\S]*?)<\/a>/gi)) {
+    const url = new URL(match[1], base).href;
+    const chapterTitle = cleanText(match[2] || match[3]);
+    if (!chapterTitle || seen.has(url)) continue;
+    seen.add(url); newestFirst.push({ title: chapterTitle, url });
+  }
+  if (!newestFirst.length) throw new Error("没有识别到最新章节");
+  const chapters = newestFirst.reverse();
+  let cursor = "";
+  try { cursor = previousLink(await fetchHtml(new URL(chapters[0].url)), new URL(chapters[0].url)); } catch { /* latest list still remains usable */ }
+  return {
+    title, author, chapters,
+    source: "笔趣阁 biqu33·链式回溯",
+    sourceKey: "biqu33",
+    recommendedConcurrency: 2,
+    notice: cursor ? "目录仅展示最近章节，正在支持沿“上一章”回溯完整目录。" : "已读取网站公开展示的章节。",
+    discovery: cursor ? { mode: "previous-chain", cursor, complete: false } : undefined,
+  };
+}
+
+async function discoverPrevious(url: URL) {
+  const html = await fetchHtml(url);
+  const title = biquChapterTitle(html);
+  const cursor = previousLink(html, url);
+  return { chapter: { title, url: url.href }, cursor, complete: !cursor };
+}
+
+async function discoverPreviousBatch(url: URL, requestedLimit: unknown) {
+  const limit = Math.max(1, Math.min(20, Number(requestedLimit) || 12));
+  const chapters: { title: string; url: string }[] = [];
+  let cursor = url.href;
+  for (let index = 0; index < limit && cursor; index += 1) {
+    const result = await discoverPrevious(new URL(cursor));
+    chapters.push(result.chapter);
+    cursor = result.cursor;
+  }
+  return { chapters, cursor, complete: !cursor };
+}
+
+async function parseBiqu33Chapter(html: string, base: URL, expectedTitle: string) {
+  const pageUrls = new Set<string>();
+  for (const match of html.matchAll(/<a\b[^>]*href=["']?([^\s"'>]+_\d+\/)["']?[^>]*class=["']?post-page-numbers/gi)) {
+    try { pageUrls.add(new URL(match[1], base).href); } catch { /* ignore malformed pagination */ }
+  }
+  const extraPages = await Promise.all([...pageUrls].slice(0, 12).map(async (href) => ({ href, html: await fetchHtml(new URL(href)) })));
+  const pages = [{ href: base.href, html }, ...extraPages].sort((a, b) => {
+    const number = (href: string) => Number(/_(\d+)\/$/.exec(new URL(href).pathname)?.[1] || 1);
+    return number(a.href) - number(b.href);
+  });
+  const content = pages.map((page) => {
+    const main = extractBalancedElement(page.html, /<div\b[^>]*\bid=["']?hp_photos["']?[^>]*>/i)
+      || extractBalancedElement(page.html, /<div\b[^>]*\bclass=["'][^"']*article-content[^"']*["'][^>]*>/i);
+    return cleanText(main);
+  }).filter(Boolean).join("\n\n");
+  const cleaned = postProcessChapter(content, expectedTitle);
+  if (cleaned.length < 80) throw new Error("笔趣阁分页正文未能识别");
+  return cleaned;
+}
+
 function parseIndex(html: string, base: URL) {
   const title = cleanText(/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] || /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] || "未命名小说").replace(/最新章节.*|全文阅读.*|_.*$/, "").trim();
   const bodyText = cleanText(html.slice(0, Math.min(html.length, 120000)));
@@ -344,15 +521,39 @@ function parseChapter(html: string, expectedTitle = "") {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    if (body.action === "search") {
+      const query = typeof body.query === "string" ? body.query.trim() : "";
+      const requested = typeof body.source === "string" ? body.source : "auto";
+      if (query.length < 2 || query.length > 80) throw new Error("请输入 2–80 个字的书名");
+      const result = await searchBook(query, requested);
+      if (!result.match) return NextResponse.json({ error: "没有在可检索书源中找到同名作品", attempts: result.attempts }, { status: 404 });
+      return NextResponse.json(result);
+    }
     const url = validateUrl(body.url);
     const source = sourceFor(url);
     const expectedTitle = typeof body.title === "string" ? body.title : "";
+    if (body.action === "previous") {
+      if (source !== "biqu33") throw new Error("该书源不支持上一章链式发现");
+      return NextResponse.json(await discoverPrevious(url));
+    }
+    if (body.action === "previous-batch") {
+      if (source !== "biqu33") throw new Error("该书源不支持上一章链式发现");
+      return NextResponse.json(await discoverPreviousBatch(url, body.limit));
+    }
     if (source === "wikisource") {
       const page = await fetchWikisourcePage(url);
       if (body.action === "index") return NextResponse.json(parseWikisourceIndex(page, url));
       if (body.action === "chapter") return NextResponse.json({ content: parseWikisourceChapter(page, expectedTitle) });
     }
     const html = await fetchHtml(url);
+    if (source === "biqu33") {
+      if (body.action === "index") return NextResponse.json(await parseBiqu33Index(html, url));
+      if (body.action === "chapter") return NextResponse.json({ content: await parseBiqu33Chapter(html, url, expectedTitle) });
+    }
+    if (source === "piaotia") {
+      if (body.action === "index") return NextResponse.json({ ...parseIndex(html, url), source: "飘天文学", sourceKey: "piaotia", recommendedConcurrency: 8, notice: "默认书源；仅整理当前公开可访问的章节。" });
+      if (body.action === "chapter") return NextResponse.json({ content: parseChapter(html, expectedTitle) });
+    }
     if (source === "zongheng") {
       if (body.action === "index") return NextResponse.json(await parseZonghengIndex(html, url));
       if (body.action === "chapter") return NextResponse.json({ content: parseZonghengChapter(html, expectedTitle) });
@@ -365,7 +566,7 @@ export async function POST(request: NextRequest) {
       if (body.action === "index") return NextResponse.json(parseAozoraIndex(html, url));
       if (body.action === "chapter") return NextResponse.json({ content: parseAozoraChapter(html) });
     }
-    if (body.action === "index") return NextResponse.json({ ...parseIndex(html, url), source: "通用公开 HTML", recommendedConcurrency: 6, notice: "仅整理你有权保存的公开内容。" });
+    if (body.action === "index") return NextResponse.json({ ...parseIndex(html, url), source: "通用公开 HTML", sourceKey: "generic", recommendedConcurrency: 6, notice: "仅整理你有权保存的公开内容。" });
     if (body.action === "chapter") return NextResponse.json({ content: parseChapter(html, expectedTitle) });
     return NextResponse.json({ error: "未知操作" }, { status: 400 });
   } catch (error) {
