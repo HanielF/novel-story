@@ -3,9 +3,15 @@
 import { useMemo, useRef, useState } from "react";
 
 type Chapter = { title: string; url: string; selected: boolean; status: "waiting" | "done" | "failed" };
-type BookInfo = { title: string; author: string; chapters: Omit<Chapter, "selected" | "status">[] };
+type BookInfo = { title: string; author: string; source?: string; notice?: string; recommendedConcurrency?: number; chapters: Omit<Chapter, "selected" | "status">[] };
 
-const EXAMPLE = "https://www.piaotia.com/html/15/15695/";
+const EXAMPLE = "https://zh.wikisource.org/wiki/%E7%B4%85%E6%A8%93%E5%A4%A2";
+const SOURCES = [
+  { name: "中文维基文库", detail: "中文公版及自由授权文本 · 支持分回目录", url: EXAMPLE, action: "试试《红楼梦》" },
+  { name: "青空文库", detail: "日文公版与授权作品 · 支持图书卡和 XHTML", url: "https://www.aozora.gr.jp/cards/000148/card773.html", action: "试试『こころ』" },
+  { name: "纵横中文网", detail: "tickmao 精选规则 · 官方目录 · 自动排除付费章节", url: "https://www.zongheng.com/detail/1067695", action: "试试公开章节" },
+  { name: "晋江文学城", detail: "tickmao 精选规则 · 仅免费章节 · 自动跳过 VIP", url: "https://www.jjwxc.net/onebook.php?novelid=4368324", action: "试试免费作品" },
+];
 
 export default function Home() {
   const [url, setUrl] = useState(EXAMPLE);
@@ -39,6 +45,7 @@ export default function Home() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "目录读取失败");
       setBook(data);
+      if (data.recommendedConcurrency) setConcurrency(data.recommendedConcurrency);
       setChapters(data.chapters.map((c: Chapter) => ({ ...c, selected: true, status: "waiting" })));
       setMessage(`已找到 ${data.chapters.length} 章，请检查后开始制作`);
     } catch (error) {
@@ -121,6 +128,8 @@ export default function Home() {
     const text = [
       book.title,
       book.author ? `作者：${book.author}` : "",
+      book.source ? `来源：${book.source}` : "",
+      `原始链接：${url}`,
       "",
       ...selected.flatMap((chapter) => [chapter.title, "", contentsRef.current[chapter.url], "", ""]),
     ].join("\r\n");
@@ -152,7 +161,7 @@ export default function Home() {
       <section className="hero" id="top">
         <div className="eyebrow">NOVEL TO TXT · 本地阅读工具</div>
         <h1>一条链接，<br /><em>收好整本故事。</em></h1>
-        <p className="intro">读取公开章节目录，按原顺序整理正文，导出为兼容手机阅读器与 Kindle 的 UTF-8 TXT 文件。</p>
+        <p className="intro">读取公版、自由授权或你有权保存的公开章节，按原顺序整理正文，导出为兼容手机阅读器与 Kindle 的 UTF-8 TXT。</p>
         <div className="url-box">
           <label htmlFor="novel-url">小说目录页</label>
           <div className="url-row">
@@ -171,11 +180,13 @@ export default function Home() {
       {book ? (
         <section className="workspace">
           <div className="book-head">
-            <div><span className="section-label">已识别书目</span><h2>{book.title}</h2><p>{book.author || "作者信息未识别"} · 共 {chapters.length} 章</p></div>
+            <div><span className="section-label">{book.source || "已识别书目"}</span><h2>{book.title}</h2><p>{book.author || "作者信息未识别"} · 共 {chapters.length} 章{book.notice ? ` · ${book.notice}` : ""}</p></div>
             <div className="book-actions">
               <label className="speed-control">并发
                 <select value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} disabled={running}>
+                  <option value={1}>1 路（单篇）</option>
                   <option value={3}>3 路（稳妥）</option>
+                  <option value={4}>4 路（公开书源）</option>
                   <option value={6}>6 路（推荐）</option>
                   <option value={10}>10 路（快速）</option>
                 </select>
@@ -202,8 +213,12 @@ export default function Home() {
         </section>
       ) : (
         <section className="sample">
-          <div className="sample-card"><span>示例链接</span><code>{EXAMPLE}</code><button onClick={() => setUrl(EXAMPLE)}>使用此示例</button></div>
-          <div className="note"><b>请尊重作者与网站</b><p>仅整理你有权访问和保存的内容。站点限制自动访问时，本工具会停止并提示，不会绕过验证或付费限制。</p></div>
+          <div className="source-list">
+            <span className="section-label">已适配公开书源</span>
+            {SOURCES.map((source) => <div className="source-row" key={source.name}><div><b>{source.name}</b><p>{source.detail}</p></div><button onClick={() => setUrl(source.url)}>{source.action}</button></div>)}
+            <div className="source-row"><div><b>通用公开 HTML</b><p>兼容常见的“目录页 + 章节页”结构</p></div><span>自动识别</span></div>
+          </div>
+          <div className="note"><b>请尊重作者与网站</b><p>仅整理你有权访问和保存的内容。导出文件会保留书源和原始链接；站点限制自动访问时，本工具会停止并提示，不会绕过验证或付费限制。</p></div>
         </section>
       )}
 
