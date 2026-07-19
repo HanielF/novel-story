@@ -83,6 +83,24 @@ function parseChapter(html: string) {
   ];
   let content = "";
   for (const value of candidates) { const cleaned = cleanText(value); if (cleaned.length > content.length) content = cleaned; }
+  if (content.length < 80) {
+    const withoutChrome = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<iframe[\s\S]*?<\/iframe>/gi, " ")
+      .replace(/<form[\s\S]*?<\/form>/gi, " ");
+    const h1End = withoutChrome.search(/<\/h1\s*>/i);
+    const bodyEnd = withoutChrome.search(/<\/body\s*>/i);
+    const articleLike = withoutChrome.slice(h1End >= 0 ? h1End + 5 : 0, bodyEnd > h1End ? bodyEnd : undefined);
+    const lines = cleanText(articleLike)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !/^(上一章|下一章|返回目录|返回书页|章节列表|加入书签|投推荐票|错误举报|繁體中文|简体中文|[|｜·•]+)$/.test(line))
+      .filter((line) => !/(飘天文学|PT文学|Copyright|本站域名|请记住本站|最新网址|章节错误|手机阅读|加入收藏)/i.test(line));
+    const fallback = lines.join("\n\n");
+    if (fallback.length > content.length) content = fallback;
+  }
   content = content.replace(/(?:请记住本站|最新网址|手机阅读|章节错误|加入书签|返回目录)[\s\S]{0,120}$/gi, "").trim();
   if (content.length < 80) throw new Error("未能识别正文，页面结构可能已变化");
   return content;

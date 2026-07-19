@@ -14,8 +14,8 @@ export default function Home() {
   const [message, setMessage] = useState("粘贴小说目录页链接，从读取目录开始");
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
-  const [contents, setContents] = useState<Record<string, string>>({});
   const [failureReason, setFailureReason] = useState("");
+  const contentsRef = useRef<Record<string, string>>({});
   const abortRef = useRef(false);
 
   const selectedCount = chapters.filter((c) => c.selected).length;
@@ -27,7 +27,7 @@ export default function Home() {
     setMessage("正在辨认书名与章节目录…");
     setBook(null);
     setChapters([]);
-    setContents({});
+    contentsRef.current = {};
     setFailureReason("");
     try {
       const response = await fetch("/api/novel", {
@@ -53,7 +53,7 @@ export default function Home() {
     setRunning(true);
     setFailureReason("");
     setMessage("开始逐章整理，请保持页面开启");
-    const nextContents = { ...contents };
+    const nextContents = contentsRef.current;
     let consecutiveFailures = 0;
     let lastFailure = "";
     let totalFailures = 0;
@@ -62,15 +62,20 @@ export default function Home() {
       if (!chapter.selected || nextContents[chapter.url]) continue;
       if (abortRef.current) break;
       try {
-        const response = await fetch("/api/novel", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "chapter", url: chapter.url }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error);
+        let data: { content?: string; error?: string } = {};
+        let response: Response | null = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          response = await fetch("/api/novel", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "chapter", url: chapter.url }),
+          });
+          data = await response.json();
+          if (response.ok) break;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 900 * (attempt + 1)));
+        }
+        if (!response?.ok || !data.content) throw new Error(data.error || "章节读取失败");
         nextContents[chapter.url] = data.content;
-        setContents({ ...nextContents });
         setChapters((items) => items.map((item) => item.url === chapter.url ? { ...item, status: "done" } : item));
         consecutiveFailures = 0;
       } catch (error) {
@@ -94,12 +99,12 @@ export default function Home() {
 
   function downloadTxt() {
     if (!book) return;
-    const selected = chapters.filter((c) => c.selected && contents[c.url]);
+    const selected = chapters.filter((c) => c.selected && contentsRef.current[c.url]);
     const text = [
       book.title,
       book.author ? `作者：${book.author}` : "",
       "",
-      ...selected.flatMap((chapter) => [chapter.title, "", contents[chapter.url], "", ""]),
+      ...selected.flatMap((chapter) => [chapter.title, "", contentsRef.current[chapter.url], "", ""]),
     ].join("\r\n");
     const blob = new Blob(["\uFEFF", text], { type: "text/plain;charset=utf-8" });
     const href = URL.createObjectURL(blob);
