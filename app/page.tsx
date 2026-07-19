@@ -15,6 +15,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [contents, setContents] = useState<Record<string, string>>({});
+  const [failureReason, setFailureReason] = useState("");
   const abortRef = useRef(false);
 
   const selectedCount = chapters.filter((c) => c.selected).length;
@@ -27,6 +28,7 @@ export default function Home() {
     setBook(null);
     setChapters([]);
     setContents({});
+    setFailureReason("");
     try {
       const response = await fetch("/api/novel", {
         method: "POST",
@@ -49,8 +51,12 @@ export default function Home() {
     if (!book || !selectedCount) return;
     abortRef.current = false;
     setRunning(true);
+    setFailureReason("");
     setMessage("开始逐章整理，请保持页面开启");
     const nextContents = { ...contents };
+    let consecutiveFailures = 0;
+    let lastFailure = "";
+    let totalFailures = 0;
     for (let i = 0; i < chapters.length; i += 1) {
       const chapter = chapters[i];
       if (!chapter.selected || nextContents[chapter.url]) continue;
@@ -66,13 +72,24 @@ export default function Home() {
         nextContents[chapter.url] = data.content;
         setContents({ ...nextContents });
         setChapters((items) => items.map((item) => item.url === chapter.url ? { ...item, status: "done" } : item));
-      } catch {
+        consecutiveFailures = 0;
+      } catch (error) {
+        lastFailure = error instanceof Error ? error.message : "章节读取失败";
+        consecutiveFailures += 1;
+        totalFailures += 1;
+        setFailureReason(lastFailure);
         setChapters((items) => items.map((item) => item.url === chapter.url ? { ...item, status: "failed" } : item));
+        if (consecutiveFailures >= 3) {
+          setMessage(`已暂停：连续 3 章失败。${lastFailure}`);
+          abortRef.current = true;
+          break;
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, 260));
+      await new Promise((resolve) => setTimeout(resolve, 700));
     }
     setRunning(false);
-    setMessage(abortRef.current ? "已暂停，可继续制作" : "整理完成，可以下载 TXT 了");
+    if (!abortRef.current) setMessage(totalFailures ? `本轮完成，仍有 ${totalFailures} 章失败，可点击继续制作重试` : "整理完成，可以下载 TXT 了");
+    else if (!lastFailure) setMessage("已暂停，可继续制作");
   }
 
   function downloadTxt() {
@@ -98,7 +115,7 @@ export default function Home() {
   }
 
   const statusText = useMemo(() => {
-    const failed = chapters.filter((c) => c.status === "failed").length;
+    const failed = chapters.filter((c) => c.selected && c.status === "failed").length;
     return failed ? `${failed} 章失败，可再次点击“继续制作”重试` : `${doneCount} / ${selectedCount} 章已整理`;
   }, [chapters, doneCount, selectedCount]);
 
@@ -148,7 +165,7 @@ export default function Home() {
             ))}
           </div>
           <div className="export-bar">
-            <div className="progress-copy"><strong>{statusText}</strong><span>TXT 使用 UTF-8 编码，中文设备可直接导入</span></div>
+            <div className="progress-copy"><strong>{statusText}</strong><span>{failureReason ? `原因：${failureReason}` : "TXT 使用 UTF-8 编码，中文设备可直接导入"}</span></div>
             <div className="meter" aria-label={`进度 ${percent}%`}><span style={{ width: `${percent}%` }} /></div>
             {running ? <button className="stop" onClick={() => { abortRef.current = true; }}>暂停</button> : doneCount === selectedCount && selectedCount > 0 ? <button className="primary" onClick={downloadTxt}>下载 TXT</button> : <button className="primary" onClick={buildTxt} disabled={!selectedCount}>{doneCount ? "继续制作" : "开始制作"}</button>}
           </div>

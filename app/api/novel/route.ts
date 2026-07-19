@@ -16,7 +16,18 @@ function validateUrl(raw: unknown) {
 }
 
 async function fetchHtml(url: URL) {
-  const response = await fetch(url, { redirect: "follow", headers: { "user-agent": "Mozilla/5.0 (compatible; ShiyeReader/1.0)", accept: "text/html,application/xhtml+xml" } });
+  const directoryUrl = new URL(url.href);
+  if (/\.html?$/i.test(directoryUrl.pathname)) directoryUrl.pathname = directoryUrl.pathname.replace(/[^/]+$/, "");
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: {
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.6",
+      referer: directoryUrl.href,
+      "cache-control": "no-cache",
+    },
+  });
   if (!response.ok) throw new Error(`目标网站返回 ${response.status}`);
   const bytes = await response.arrayBuffer();
   const probe = new TextDecoder("latin1").decode(bytes.slice(0, 4096));
@@ -26,6 +37,22 @@ async function fetchHtml(url: URL) {
   catch { html = new TextDecoder("utf-8").decode(bytes); }
   if (/Attention Required|cf-error-details|captcha|验证码/i.test(html)) throw new Error("目标网站要求浏览器验证，暂时无法自动读取。请稍后重试，或更换可公开访问的来源。");
   return html;
+}
+
+function extractBalancedElement(html: string, openPattern: RegExp) {
+  const open = openPattern.exec(html);
+  if (!open || open.index === undefined) return "";
+  const start = open.index + open[0].length;
+  const tagPattern = /<\/?div\b[^>]*>/gi;
+  tagPattern.lastIndex = start;
+  let depth = 1;
+  let match: RegExpExecArray | null;
+  while ((match = tagPattern.exec(html))) {
+    if (/^<\/div/i.test(match[0])) depth -= 1;
+    else depth += 1;
+    if (depth === 0) return html.slice(start, match.index);
+  }
+  return html.slice(start);
 }
 
 function parseIndex(html: string, base: URL) {
@@ -50,12 +77,12 @@ function parseIndex(html: string, base: URL) {
 
 function parseChapter(html: string) {
   const candidates = [
-    /<div[^>]+id=["']content["'][^>]*>([\s\S]*?)<\/div>/i,
-    /<div[^>]+class=["'][^"']*(?:content|chapter-content|read-content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
-    /<article[^>]*>([\s\S]*?)<\/article>/i,
+    extractBalancedElement(html, /<div\b[^>]*\bid=["'](?:content|contents|chaptercontent)["'][^>]*>/i),
+    extractBalancedElement(html, /<div\b[^>]*\bclass=["'][^"']*(?:showtxt|chapter-content|read-content|readcontent|nr_nr)[^"']*["'][^>]*>/i),
+    /<article[^>]*>([\s\S]*?)<\/article>/i.exec(html)?.[1] || "",
   ];
   let content = "";
-  for (const pattern of candidates) { const value = pattern.exec(html)?.[1]; if (value && cleanText(value).length > content.length) content = cleanText(value); }
+  for (const value of candidates) { const cleaned = cleanText(value); if (cleaned.length > content.length) content = cleaned; }
   content = content.replace(/(?:请记住本站|最新网址|手机阅读|章节错误|加入书签|返回目录)[\s\S]{0,120}$/gi, "").trim();
   if (content.length < 80) throw new Error("未能识别正文，页面结构可能已变化");
   return content;
