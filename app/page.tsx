@@ -54,6 +54,7 @@ export default function Home() {
     setFailureReason("");
     setMessage("开始逐章整理，请保持页面开启");
     const nextContents = contentsRef.current;
+    const workingChapters = chapters.map((chapter) => ({ ...chapter }));
     let consecutiveFailures = 0;
     let lastFailure = "";
     let totalFailures = 0;
@@ -76,14 +77,16 @@ export default function Home() {
         }
         if (!response?.ok || !data.content) throw new Error(data.error || "章节读取失败");
         nextContents[chapter.url] = data.content;
-        setChapters((items) => items.map((item) => item.url === chapter.url ? { ...item, status: "done" } : item));
+        workingChapters[i].status = "done";
+        if ((i + 1) % 10 === 0) setChapters(workingChapters.map((item) => ({ ...item })));
         consecutiveFailures = 0;
       } catch (error) {
         lastFailure = error instanceof Error ? error.message : "章节读取失败";
         consecutiveFailures += 1;
         totalFailures += 1;
         setFailureReason(lastFailure);
-        setChapters((items) => items.map((item) => item.url === chapter.url ? { ...item, status: "failed" } : item));
+        workingChapters[i].status = "failed";
+        setChapters(workingChapters.map((item) => ({ ...item })));
         if (consecutiveFailures >= 3) {
           setMessage(`已暂停：连续 3 章失败。${lastFailure}`);
           abortRef.current = true;
@@ -92,6 +95,7 @@ export default function Home() {
       }
       await new Promise((resolve) => setTimeout(resolve, 700));
     }
+    setChapters(workingChapters.map((item) => ({ ...item })));
     setRunning(false);
     if (!abortRef.current) setMessage(totalFailures ? `本轮完成，仍有 ${totalFailures} 章失败，可点击继续制作重试` : "整理完成，可以下载 TXT 了");
     else if (!lastFailure) setMessage("已暂停，可继续制作");
