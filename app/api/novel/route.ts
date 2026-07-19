@@ -3,7 +3,32 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "edge";
 
 function cleanText(value: string) {
-  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n").replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<br\s*\/?>|<\/br\s*>/gi, "\n").replace(/<\/(?:p|div|h1|h2|h3|li|section|article)>/gi, "\n").replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+function normalizeTitle(value: string) {
+  return cleanText(value).replace(/[\s【】〖〗《》]/g, "").toLowerCase();
+}
+
+function postProcessChapter(value: string, expectedTitle = "") {
+  let lines = value.split("\n").map((line) => line.trim()).filter(Boolean);
+  const titleKey = normalizeTitle(expectedTitle);
+  if (titleKey) {
+    let lastTitleIndex = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      if (normalizeTitle(lines[index]) === titleKey) lastTitleIndex = index;
+    }
+    if (lastTitleIndex >= 0) lines = lines.slice(lastTitleIndex + 1);
+  }
+  lines = lines.filter((line) => {
+    const compact = line.replace(/\s+/g, "");
+    if (!compact || /^[()（）]+$/.test(compact)) return false;
+    if (titleKey && normalizeTitle(line) === titleKey) return false;
+    if (/(快捷键|上一章|下一章|返回目录|返回书页|章节列表|加入书签|投推荐票|错误举报)/.test(compact)) return false;
+    if (/(飘天文学|PT文学|Copyright|本站域名|请记住本站|最新网址|手机阅读|加入收藏)/i.test(compact)) return false;
+    return true;
+  });
+  return lines.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function validateUrl(raw: unknown) {
@@ -75,7 +100,7 @@ function parseIndex(html: string, base: URL) {
   return { title, author, chapters };
 }
 
-function parseChapter(html: string) {
+function parseChapter(html: string, expectedTitle = "") {
   const candidates = [
     extractBalancedElement(html, /<div\b[^>]*\bid=["'](?:content|contents|chaptercontent)["'][^>]*>/i),
     extractBalancedElement(html, /<div\b[^>]*\bclass=["'][^"']*(?:showtxt|chapter-content|read-content|readcontent|nr_nr)[^"']*["'][^>]*>/i),
@@ -101,7 +126,7 @@ function parseChapter(html: string) {
     const fallback = lines.join("\n\n");
     if (fallback.length > content.length) content = fallback;
   }
-  content = content.replace(/(?:请记住本站|最新网址|手机阅读|章节错误|加入书签|返回目录)[\s\S]{0,120}$/gi, "").trim();
+  content = postProcessChapter(content.replace(/(?:请记住本站|最新网址|手机阅读|章节错误|加入书签|返回目录)[\s\S]{0,120}$/gi, "").trim(), expectedTitle);
   if (content.length < 80) throw new Error("未能识别正文，页面结构可能已变化");
   return content;
 }
@@ -112,7 +137,7 @@ export async function POST(request: NextRequest) {
     const url = validateUrl(body.url);
     const html = await fetchHtml(url);
     if (body.action === "index") return NextResponse.json(parseIndex(html, url));
-    if (body.action === "chapter") return NextResponse.json({ content: parseChapter(html) });
+    if (body.action === "chapter") return NextResponse.json({ content: parseChapter(html, typeof body.title === "string" ? body.title : "") });
     return NextResponse.json({ error: "未知操作" }, { status: 400 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "处理失败" }, { status: 400 });

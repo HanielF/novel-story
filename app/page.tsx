@@ -79,7 +79,7 @@ export default function Home() {
             response = await fetch("/api/novel", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ action: "chapter", url: chapter.url }),
+              body: JSON.stringify({ action: "chapter", url: chapter.url, title: chapter.title }),
             });
             data = await response.json();
             if (response.ok) break;
